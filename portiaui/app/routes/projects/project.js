@@ -8,15 +8,6 @@ export default Ember.Route.extend({
     },
 
     afterModel(model) {
-        // XXX: Need to wait for project id to be loaded
-        Ember.run.next(this, function() {
-            this.store.findAll('schema');
-            this.store.findAll('spider');
-            this.store.findAll('extractor');
-            //this.store.findAll('item');
-            //this.store.findAll('item-annotation');
-            //this.store.findAll('annotation');
-        });
         return model.checkChanges();
     },
 

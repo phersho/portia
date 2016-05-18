@@ -1,18 +1,24 @@
 from __future__ import absolute_import
-import json, re, shutil, errno, os
+import json
+import re
 
 import slyd.errors
 
+from six.moves import StringIO
+
 from os.path import join, splitext
+
+from django.core.files.storage import File
 from scrapy.http import HtmlResponse
 from twisted.web.resource import NoResource, ForbiddenResource
 from twisted.web.server import NOT_DONE_YET
 from jsonschema.exceptions import ValidationError
 from .resource import SlydJsonObjectResource
 from .html import html4annotation
-from .errors import BaseHTTPError
+from .errors import BaseHTTPError, BadRequest
 from .utils.projects import allowed_file_name, ProjectModifier
 from .utils.extraction import extract_items
+from .utils.storage import FsStorage
 
 
 def create_project_resource(spec_manager):
@@ -51,7 +57,7 @@ class ProjectSpec(object):
         return callback(**kwargs)
 
     def list_spiders(self):
-        for fname in os.listdir(join(self.project_dir, "spiders")):
+        for fname in self.storage.listdir(join(self.project_dir, "spiders")):
             if fname.endswith(".json"):
                 yield splitext(fname)[0]
 
@@ -61,7 +67,7 @@ class ProjectSpec(object):
         for template in spider_spec.get('template_names', []):
             try:
                 templates.append(self.resource('spiders', spider, template))
-            except TypeError:
+            except IOError:
                 self.remove_template(spider, template)
         spider_spec['templates'] = templates
         return spider_spec
@@ -82,18 +88,22 @@ class ProjectSpec(object):
     def rename_spider(self, from_name, to_name):
         if to_name == from_name:
             return
+        # TODO: Make optional
+        if not re.match('^[a-zA-Z0-9][a-zA-Z0-9_\.-]*$', to_name):
+            raise BadRequest('Bad Request', 'Invalid spider name')
         if to_name in self.list_spiders():
             raise IOError('Can\'t rename spider as a spider with the name, '
                           '"%s", already exists for this project.' % to_name)
-        os.rename(self._rfilename('spiders', from_name),
-                  self._rfilename('spiders', to_name))
+        self.storage.move(self._rfilename('spiders', from_name),
+                          self._rfilename('spiders', to_name))
 
         dirname = self._rdirname('spiders', from_name)
-        if os.path.isdir(dirname):
-            os.rename(dirname, self._rdirname('spiders', to_name))
+        if self.storage.isdir(dirname):
+            self.storage.move(dirname, self._rdirname('spiders', to_name))
 
     def remove_spider(self, name):
-        os.remove(self._rfilename('spiders', name))
+        self.storage.delete(self._rfilename('spiders', name))
+        self.storage.rmtree(self._rdirname('spiders', name))
 
     def rename_template(self, spider_name, from_name, to_name):
         template = self.resource('spiders', spider_name, from_name)
@@ -106,7 +116,7 @@ class ProjectSpec(object):
 
     def remove_template(self, spider_name, name):
         try:
-            os.remove(self._rfilename('spiders', spider_name, name))
+            self.storage.delete(self._rfilename('spiders', spider_name, name))
         except OSError:
             pass
         spider = self.spider_json(spider_name)
@@ -120,10 +130,10 @@ class ProjectSpec(object):
         return join(self.project_dir, *resources) + '.json'
 
     def _rdirname(self, *resources):
-        return join(self.project_dir, *resources[0][:-1])
+        return join(self.project_dir, *resources[:-1])
 
     def _rfile(self, resources, mode='rb'):
-        return open(self._rfilename(*resources), mode)
+        return self.storage.open(self._rfilename(*resources), mode)
 
     def _process_extraction_urls(self, urls):
         if hasattr(urls, 'get'):
@@ -140,11 +150,7 @@ class ProjectSpec(object):
         extract_items(self, spider_name, urls, request)
 
     def resource(self, *resources):
-        print "for resource", resources, 'filename', self._rfilename(*resources)
-        with self._rfile(resources) as f:
-            print f.read()
-        with self._rfile(resources) as f:
-            return json.load(f)
+        return json.load(self.storage.open(self._rfilename(*resources)))
 
     def writejson(self, outf, *resources):
         """Write json for the resource specified
@@ -153,16 +159,21 @@ class ProjectSpec(object):
 
         If the file does not exist, an empty dict is written
         """
-        shutil.copyfileobj(self._rfile(resources), outf)
+        try:
+            data = self.storage.open(self._rfile(*resources).read())
+        except IOError:
+            data = '{}'
+        outf.write(data)
 
-    def savejson(self, obj, *resources):
+    def savejson(self, obj, resources):
         # convert to json in a way that will make sense in diffs
         try:
-            os.makedirs(self._rdirname(*resources))
+            self.storage.makedirs(self._rdirname(*resources))
         except OSError:
             pass
-        with self._rfile(*resources, mode='wb') as ouf:
-            json.dump(obj, ouf, sort_keys=True, indent=4)
+        fname = self._rfilename(*resources)
+        fdata = File(StringIO(json.dumps(obj, sort_keys=True, indent=4)))
+        self.storage.save(fname, fdata)
 
     def json(self, out):
         """Write spec as json to the file-like object
@@ -185,11 +196,23 @@ class ProjectSpec(object):
             last = match.end()
         out.write(json_template[last:])
 
+    def commit_changes(self):
+        if getattr(self, 'storage', None):
+            self.storage.commit()
+
     def __repr__(self):
         return '%s(%s)' % (self.__class__.__name__, str(self))
 
     def __str__(self):
         return '%s, %s' % (self.project_name, self.username)
+
+
+class FileSystemProjectSpec(ProjectSpec):
+    storage_class = FsStorage
+
+    def __init__(self, project_name, auth_info):
+        super(FileSystemProjectSpec, self).__init__(project_name, auth_info)
+        self.storage = self.storage_class(self.project_dir)
 
 
 class ProjectResource(SlydJsonObjectResource, ProjectModifier):
@@ -231,7 +254,7 @@ class ProjectResource(SlydJsonObjectResource, ProjectModifier):
                 elif len(rpath) == 1 and rpath[0] in project_spec.resources:
                     return {rpath[0]: project_spec.resource(*rpath)}
             # Trying to access non existent path
-            except (KeyError, IndexError, TypeError):
+            except (KeyError, IndexError, IOError):
                 self.not_found()
         self.not_found()
 
