@@ -117,7 +117,7 @@ class ProjectSpec(object):
     def remove_template(self, spider_name, name):
         try:
             self.storage.delete(self._rfilename('spiders', spider_name, name))
-        except OSError:
+        except IOError:
             pass
         spider = self.spider_json(spider_name)
         try:
@@ -131,9 +131,6 @@ class ProjectSpec(object):
 
     def _rdirname(self, *resources):
         return join(self.project_dir, *resources[:-1])
-
-    def _rfile(self, resources, mode='rb'):
-        return self.storage.open(self._rfilename(*resources), mode)
 
     def _process_extraction_urls(self, urls):
         if hasattr(urls, 'get'):
@@ -152,49 +149,11 @@ class ProjectSpec(object):
     def resource(self, *resources):
         return json.load(self.storage.open(self._rfilename(*resources)))
 
-    def writejson(self, outf, *resources):
-        """Write json for the resource specified
-
-        Multiple arguments are joined (e.g. spider, spidername).
-
-        If the file does not exist, an empty dict is written
-        """
-        try:
-            data = self.storage.open(self._rfile(*resources).read())
-        except IOError:
-            data = '{}'
-        outf.write(data)
-
     def savejson(self, obj, resources):
         # convert to json in a way that will make sense in diffs
-        try:
-            self.storage.makedirs(self._rdirname(*resources))
-        except OSError:
-            pass
         fname = self._rfilename(*resources)
         fdata = File(StringIO(json.dumps(obj, sort_keys=True, indent=4)))
         self.storage.save(fname, fdata)
-
-    def json(self, out):
-        """Write spec as json to the file-like object
-
-        This uses the file contents and avoids converting to python types
-        """
-        # assumes " is not allowed in spider names
-        template_dict = {r: 'SPEC:%s' % r for r in self.resources}
-        template_dict['spiders'] = {s: 'SPIDER:%s' % s
-                                    for s in self.list_spiders()}
-        json_template = json.dumps(template_dict)
-        last = 0
-        for match in re.finditer('"(SPEC|SPIDER):([^"]+)"', json_template):
-            out.write(json_template[last:match.start()])
-            mtype, resource = match.groups()
-            if mtype == 'SPEC':
-                self.writejson(out, resource)
-            else:
-                self.writejson(out, 'spiders', resource)
-            last = match.end()
-        out.write(json_template[last:])
 
     def commit_changes(self):
         if getattr(self, 'storage', None):
@@ -238,7 +197,7 @@ class ProjectResource(SlydJsonObjectResource, ProjectModifier):
             request.project, request.auth_info)
         rpath = request.postpath
         if not rpath:
-            project_spec.json(request)
+            return self.not_found()
         elif len(rpath) == 1 and rpath[0] == 'spiders':
             spiders = project_spec.list_spiders()
             return {"spiders": list(spiders)}

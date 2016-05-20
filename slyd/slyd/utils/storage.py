@@ -43,9 +43,6 @@ class FsStorage(CommitingStorage, FileSystemStorage):
         file_move_safe(self.path(old_file_name), self.path(new_file_name),
                        allow_overwrite=True)
 
-    def makedirs(self, name):
-        os.makedirs(self.path(name))
-
     def rmtree(self, name):
         shutil.rmtree(self.path(name))
 
@@ -145,10 +142,6 @@ class GitStorage(CommitingStorage, Storage):
                     new_path = self._prepare_path(
                         '{}/{}'.format(new_name, path[len(old_name):]))
                     self._changes[path] = (None, new_path, CHANGE_RENAME)
-
-    def makedirs(self, name):
-        # Dirs are handled by dulwich backend
-        pass
 
     def rmtree(self, name):
         name = self._prepare_path(name)

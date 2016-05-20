@@ -164,13 +164,11 @@ class ProjectsManager(object):
     def create_project(self, name):
         self.validate_project_name(name)
         project_filename = self.project_filename(name)
-        self.storage.makedirs(project_filename)
-        self.storage.makedirs(join(project_filename, 'spiders'))
         project_files = {
             'project.json': templates['PROJECT'],
             'scrapy.cfg': templates['SCRAPY'],
             'setup.py': templates['SETUP'] % str(name),
-            'items.json': 'ITEMS',
+            'items.json': templates['ITEMS'],
             join('spiders', '__init__.py'): '',
             join('spiders', 'settings.py'): templates['SETTINGS'],
         }
@@ -205,6 +203,10 @@ class ProjectsManager(object):
     def download_project(self, name, spiders=None, version=None):
         archiver = FileSystemProjectArchiver(name, base_dir=self.projectsdir)
         return archiver.archive(spiders).read()
+
+    def commit_changes(self):
+        if getattr(self, 'storage', None):
+            self.storage.commit()
 
     def _render_file(self, request, request_data, body):
         name = request_data.get('args')[0].encode('utf-8')
